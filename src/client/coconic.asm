@@ -11,9 +11,10 @@ TXLEN   equ $ff66
 
 	export	dev_init
 	export  dev_send
-	
+	export  dev_recv
+
 	section code
-	
+
 ;;; Get a 16 bit word from packet page
 ;;;   takes: X address
 ;;;   returns: D data
@@ -130,4 +131,43 @@ c@	ldd	,x++
 	;; return OK
 	clrb
 	puls	y,pc
-	
+
+
+;;; receive packet
+;;;   takes: X = buffer ptr, D = len
+;;;   returns: D = len, C = tested D
+dev_recv
+	pshs	d,x,y
+	;; test for something waiting
+	ldx	#$124
+	lbsr	getpp
+	anda	#$d
+	beq	noth@		; nothing waiting
+	;; these accesses are weird, and must be done in
+	;; this order, it seems.
+	lda	$ff61		; drop status
+	ldb	$ff60
+	ldb	$ff60		; get length
+	lda	$ff61
+	;; is too big?
+	cmpd	,s		;
+	bhi	errbig@
+	std	,s		; save as returned length
+	;; round up
+	addd	#1
+	lsra
+	rorb
+	tfr	d,y		; Y = word count
+	;; get words from NIC
+	ldx	2,s		; X = buffer
+b@	ldd	RXTX		; get a word
+	std	,x++		; save in buffer
+	leay	-1,y		; dec counter
+	bne	b@		; done?
+	;; return
+	ldd	,s++		; test D (and pull)
+	puls	x,y,pc		; pull the rest
+errbig@	bsr	drop		; drop the packet
+noth@	leas	2,s		; drop D
+	ldd	#0		; ldd and test D
+	puls	x,y,pc		; pull the test

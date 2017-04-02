@@ -7,7 +7,7 @@
 
 /*
   Original source: a Gist from
-  https://gist.github.com/austinmarton/2862515 
+  https://gist.github.com/austinmarton/2862515
 
   modified by Brett Gordon
 
@@ -25,48 +25,97 @@
 #include <net/if.h>
 #include <netinet/ether.h>
 
-#define DEST_MAC0	0xff
-#define DEST_MAC1	0xff
-#define DEST_MAC2	0xff
-#define DEST_MAC3	0xff
-#define DEST_MAC4	0xff
-#define DEST_MAC5	0xff
 
-#define ETHER_TYPE	0x0800
+#define ETHER_TYPE	0x6809
 
 #define DEFAULT_IF	"eth0"
-#define BUF_SIZ		1024
+#define BUF_SIZ		1500
+#define DWDATA          buf + 18
+
+uint8_t buf[BUF_SIZ];
+struct ifreq if_mac;    /* get mac addr */
+struct ifreq if_idx;    /* get index no of device */
+uint8_t broadcast[] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+uint8_t *myaddr = (uint8_t *)if_mac.ifr_hwaddr.sa_data;
+uint8_t *cp = DWDATA;
+struct ether_header *eh = (struct ether_header *) buf;
+struct sockaddr_ll addr; /* SOCK_RAW still needs this */
+int sockfd;
+char default_data[]="This is a default string!";
+
+void addrcpy( void *dest, const void *src ){
+    memcpy( dest, src, 6);
+}
+
+int addrcmp( const void *s1, const void *s2 ){
+    return memcmp( s1, s2, 6);
+}
+
+void sendb( void *buff, int len ){
+    memcpy( cp, buff, len );
+    cp += len;
+}
+
+void flush( void ){
+    int numbytes = cp - buf;
+    /* make outgoing destination the incoming source */
+    addrcpy( eh->ether_dhost, eh->ether_shost );
+    /* setup addr struct */
+    addr.sll_ifindex = if_idx.ifr_ifindex;
+    addr.sll_halen = ETH_ALEN;
+    addrcpy( addr.sll_addr, eh->ether_shost );
+    /* and make source = our MAC */
+    addrcpy( eh->ether_shost, myaddr );
+    /* send a response */
+    buf[14] = 0x01;
+    /* set dw data length */
+    *(uint16_t *)&buf[16] = htons(numbytes - 18);
+    /* send to linux */
+    numbytes = sendto(sockfd, buf, numbytes, 0,
+		      (struct sockaddr *)&addr, sizeof(struct sockaddr_ll) );
+    if( numbytes < 0 ) perror("sendto");
+
+    /* Print packet */
+    printf("\tData:");
+    int i;
+    for (i=0; i<numbytes; i++) printf("%02x:", buf[i]);
+    printf("\n");
+    cp = DWDATA;
+}
 
 int main(int argc, char *argv[])
 {
-	char sender[INET6_ADDRSTRLEN];
-	int sockfd, ret, i;
+	int ret, i;
 	int sockopt;
 	ssize_t numbytes;
 	struct ifreq ifopts;	/* set promiscuous mode */
-	struct ifreq if_ip;	/* get ip addr */
-	struct sockaddr_storage their_addr;
-	uint8_t buf[BUF_SIZ];
+
 	char ifName[IFNAMSIZ];
-	
+
 	/* Get interface name */
 	if (argc > 1)
 		strcpy(ifName, argv[1]);
 	else
 		strcpy(ifName, DEFAULT_IF);
 
-	/* Header structures */
-	struct ether_header *eh = (struct ether_header *) buf;
-	struct iphdr *iph = (struct iphdr *) (buf + sizeof(struct ether_header));
-	struct udphdr *udph = (struct udphdr *) (buf + sizeof(struct iphdr) + sizeof(struct ether_header));
-
-	memset(&if_ip, 0, sizeof(struct ifreq));
-
 	/* Open PF_PACKET socket, listening for EtherType ETHER_TYPE */
 	if ((sockfd = socket(PF_PACKET, SOCK_RAW, htons(ETHER_TYPE))) == -1) {
-		perror("listener: socket");	
+		perror("listener: socket");
 		return -1;
 	}
+
+	/* Get the index of the interface to send on */
+	memset(&if_idx, 0, sizeof(struct ifreq));
+	strncpy(if_idx.ifr_name, ifName, IFNAMSIZ-1);
+	if (ioctl(sockfd, SIOCGIFINDEX, &if_idx) < 0)
+	    perror("SIOCGIFINDEX");
+
+	/* Get the MAC address of the interface to send on */
+	memset(&if_mac, 0, sizeof(struct ifreq));
+	strncpy(if_mac.ifr_name, ifName, IFNAMSIZ-1);
+	if (ioctl(sockfd, SIOCGIFHWADDR, &if_mac) < 0)
+	    perror("SIOCGIFHWADDR");
+
 
 	/* Set interface to promiscuous mode - do we need to do this every time? */
 	strncpy(ifopts.ifr_name, ifName, IFNAMSIZ-1);
@@ -91,53 +140,28 @@ repeat:	printf("listener: Waiting to recvfrom...\n");
 	printf("listener: got packet %lu bytes\n", numbytes);
 
 	/* Check the packet is for me */
-	if (eh->ether_dhost[0] == DEST_MAC0 &&
-			eh->ether_dhost[1] == DEST_MAC1 &&
-			eh->ether_dhost[2] == DEST_MAC2 &&
-			eh->ether_dhost[3] == DEST_MAC3 &&
-			eh->ether_dhost[4] == DEST_MAC4 &&
-			eh->ether_dhost[5] == DEST_MAC5) {
-		printf("Correct destination MAC address\n");
-	} else {
-		printf("Wrong destination MAC: %x:%x:%x:%x:%x:%x\n",
-						eh->ether_dhost[0],
-						eh->ether_dhost[1],
-						eh->ether_dhost[2],
-						eh->ether_dhost[3],
-						eh->ether_dhost[4],
-						eh->ether_dhost[5]);
-		ret = -1;
-		goto done;
+	if (
+	     addrcmp( eh->ether_dhost, broadcast ) &&
+	     addrcmp( eh->ether_dhost, myaddr )
+	    ){
+	    goto repeat;
 	}
-
-	/* Get source IP */
-	((struct sockaddr_in *)&their_addr)->sin_addr.s_addr = iph->saddr;
-	inet_ntop(AF_INET, &((struct sockaddr_in*)&their_addr)->sin_addr, sender, sizeof sender);
-
-	/* Look up my device IP addr if possible */
-	strncpy(if_ip.ifr_name, ifName, IFNAMSIZ-1);
-	if (ioctl(sockfd, SIOCGIFADDR, &if_ip) >= 0) { /* if we can't check then don't */
-		printf("Source IP: %s\n My IP: %s\n", sender, 
-				inet_ntoa(((struct sockaddr_in *)&if_ip.ifr_addr)->sin_addr));
-		/* ignore if I sent it */
-		if (strcmp(sender, inet_ntoa(((struct sockaddr_in *)&if_ip.ifr_addr)->sin_addr)) == 0)	{
-			printf("but I sent it :(\n");
-			ret = -1;
-			goto done;
-		}
-	}
-
-	/* UDP payload length */
-	ret = ntohs(udph->len) - sizeof(struct udphdr);
 
 	/* Print packet */
 	printf("\tData:");
 	for (i=0; i<numbytes; i++) printf("%02x:", buf[i]);
 	printf("\n");
 
-done:	goto repeat;
+	sendb( default_data, strlen(default_data) );
+	flush();
+
+	/* Print packet */
+	printf("\tData:");
+	for (i=0; i<numbytes; i++) printf("%02x:", buf[i]);
+	printf("\n");
+
+	goto repeat;
 
 	close(sockfd);
 	return ret;
 }
-
