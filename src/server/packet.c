@@ -24,11 +24,10 @@
 #include <sys/socket.h>
 #include <net/if.h>
 #include <netinet/ether.h>
-
+#include "netdev.h"
 
 #define ETHER_TYPE	0x6809
 
-#define DEFAULT_IF	"eth0"
 #define BUF_SIZ		1500
 #define DWDATA          buf + 18
 
@@ -51,12 +50,7 @@ int addrcmp( const void *s1, const void *s2 ){
     return memcmp( s1, s2, 6);
 }
 
-void sendb( void *buff, int len ){
-    memcpy( cp, buff, len );
-    cp += len;
-}
-
-void flush( void ){
+void dev_flush( void ){
     int numbytes = cp - buf;
     /* make outgoing destination the incoming source */
     addrcpy( eh->ether_dhost, eh->ether_shost );
@@ -83,20 +77,17 @@ void flush( void ){
     cp = DWDATA;
 }
 
-int main(int argc, char *argv[])
+int dev_init(char *devname)
 {
 	int ret, i;
 	int sockopt;
 	ssize_t numbytes;
 	struct ifreq ifopts;	/* set promiscuous mode */
+	uint8_t *bufptr;
 
 	char ifName[IFNAMSIZ];
-
-	/* Get interface name */
-	if (argc > 1)
-		strcpy(ifName, argv[1]);
-	else
-		strcpy(ifName, DEFAULT_IF);
+	
+	strcpy(ifName, &devname[0]);
 
 	/* Open PF_PACKET socket, listening for EtherType ETHER_TYPE */
 	if ((sockfd = socket(PF_PACKET, SOCK_RAW, htons(ETHER_TYPE))) == -1) {
@@ -134,34 +125,31 @@ int main(int argc, char *argv[])
 		close(sockfd);
 		exit(EXIT_FAILURE);
 	}
-
-repeat:	printf("listener: Waiting to recvfrom...\n");
-	numbytes = recvfrom(sockfd, buf, BUF_SIZ, 0, NULL, NULL);
-	printf("listener: got packet %lu bytes\n", numbytes);
-
-	/* Check the packet is for me */
-	if (
-	     addrcmp( eh->ether_dhost, broadcast ) &&
-	     addrcmp( eh->ether_dhost, myaddr )
-	    ){
-	    goto repeat;
-	}
-
-	/* Print packet */
-	printf("\tData:");
-	for (i=0; i<numbytes; i++) printf("%02x:", buf[i]);
-	printf("\n");
-
-	sendb( default_data, strlen(default_data) );
-	flush();
-
-	/* Print packet */
-	printf("\tData:");
-	for (i=0; i<numbytes; i++) printf("%02x:", buf[i]);
-	printf("\n");
-
-	goto repeat;
-
-	close(sockfd);
 	return ret;
+}
+
+
+/* Public Interface Routines */
+
+/* Read next frame, and return address to buffer and length of that buffer */ 
+int dev_read(uint8_t **bufptr){
+    int numbytes;
+ repeat:
+    printf("listener: Waiting to recvfrom...\n");
+    numbytes = recvfrom(sockfd, buf, BUF_SIZ, 0, NULL, NULL);
+    /* Check the packet is for me */
+    if (
+	addrcmp( eh->ether_dhost, broadcast ) &&
+	addrcmp( eh->ether_dhost, myaddr )
+	){
+	goto repeat;
+    }
+    *bufptr = buf + 18;
+    return ntohs(*(uint16_t *)(buf + 16));
+}
+
+/* Write bytes to buffer */
+void dev_write(unsigned char *buf, int len){
+    memcpy( cp, buf, len );
+    cp += len;
 }

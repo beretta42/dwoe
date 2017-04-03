@@ -72,7 +72,7 @@ start
 	bcs	err
 	ldx	#hello@-1	; Print a string
 	jsr	$b99c
-	ldd	#fe-frame	; send handmade frame
+d@	ldd	#fe-frame	; send handmade frame
 	ldx	#frame
 	jsr	dev_send
 	;; receive any frame
@@ -107,8 +107,8 @@ c@	ldd	bufz
 	bsr	print
 	lda	#13
 	lbsr	putc
-	bra	a@
-	rts			; return to BASIC
+	jsr	$a1b1		; get a key
+	bra	d@
 	;; return error
 err	ldx	#bad@-1		; print bad init
 	jsr	$b99c
@@ -121,8 +121,6 @@ frame	.db	$ff,$ff,$ff,$ff,$ff,$ff ; Broadcast
 	.dw	TYPE                    ; dw ethertype
 	.db	$00			; flags (command)
 	.db	$00			; sequence
-	.dw	66			; size of data
-	.db	$01,$02,$03		; data.....
-	fill	$42,60
-	.db	$01,$02,$03
+	.dw	1			; size of data
+	.db	$23		
 fe
