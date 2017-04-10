@@ -8,18 +8,36 @@
 	section	code
 	jmp 	start
 
-BUFSIZ equ 576
-TYPE   equ $6809
+BUFSIZ equ 600			; send/recv buffer size
+TYPE   equ $6809		; ethertype of DWOE
+TO     equ 12			; timeout in clocks jiffies.
+RETRY  equ 5			; times to retry
 
-	;; our mac address
-mac	.db	$00,$01,$02,$03,$04,$05
-	;; server's mac address (broadcast to start)
+	;; a static output buffer
+obuff
 serv	.db	$ff,$ff,$ff,$ff,$ff,$ff
+mac	.db	$00,$01,$02,$03,$04,$05
+	.dw	TYPE		; ethertype
+	.db	0		; command flag
 seqno	.db	0		; current sequence number
-bufz	.dw	0		; size of current buffer
+bufz	.dw	1		; size of current buffer
+dataptr	rmb	BUFSIZ-(*-obuff) ; reserve rest for data
+
+	;; some send frame state
+opos	.dw	dataptr	; packet data pointer
+smacflag .db	0		; serv addr is set
+timeout	.dw	0		; response timeout
+retry	.db	0		; retry
+	
+	;; a static input buffer
 buff	zmb	BUFSIZ		; data buffer
 
 
+
+;;;
+;;; Debug printing routines - delete when bug free :)
+;;; 
+	
 putc	jmp	$a282
 
 putn
@@ -66,23 +84,48 @@ a@	lda	,x+
 	puls	d,x,y,pc
 
 
-start
-	ldx	#mac		; initialize NIC card
-	jsr	dev_init
-	bcs	err
-	ldx	#hello@-1	; Print a string
-	jsr	$b99c
-d@	ldd	#fe-frame	; send handmade frame
-	ldx	#frame
+;;; Send command, await result
+;;;   takes: nothing
+;;;   returns: X = result buffer, D = len, C = timeout
+;;;   note: use append routines to add data bytes to packet before using this!
+;;;   this waits for up to TO*RETRY seconds for a server reposonse
+send
+	pshs	y		; save reg
+	;;
+	;; finalize and send packet/frame
+	;;
+	ldb	#RETRY		; reset retry count
+	stb	retry
+again@	ldd	opos
+	subd	#dataptr
+	std	bufz
+	addd	#dataptr-obuff
+	ldx	#obuff
 	jsr	dev_send
-	;; receive any frame
-a@	ldx	#buff
+	;; set timer
+	ldd	$112
+	addd	#TO
+	std	timeout
+	;;
+	;; receive a frame
+	;;
+a@	ldx	#buff		; get a frame from NIC
 	ldd	#BUFSIZ
 	jsr	dev_recv
 	std	bufz
-	beq	a@		; is size 0? no data
+	bne	d@		; is size 0? no data
+	;; test for timeout
+	ldd	$112		; timeout?
+	cmpd	timeout
+	blt	a@		; no, try receive again
+	dec	retry		; bump retry counter
+	beq	toerr@		; 
+	bra	again@		; resend packet 
+	;;
+	;; Toss out non matching packets/frames
+	;;
 	;; Is our ethertype?
-	ldd	buff+12
+d@	ldd	buff+12
 	cmpd	#TYPE
 	bne	a@		; nope ...do again
 	;; Is it our MAC?
@@ -101,26 +144,94 @@ b@	lda	,x+
 	;; does sequence match ours?
 	cmpb	seqno
 	bne	a@		; nope ...do again
-	;; print it
-c@	ldd	bufz
-	ldx	#buff
-	bsr	print
-	lda	#13
+	;;
+	;; **** Good packet from here ****
+	;;
+	;;  grab server MAC
+	tst	smacflag
+	bne 	c@		; don't need one
+	com	smacflag	; set flag
+	ldx	#serv		; copy sender's mac
+	ldy	#buff+6
+	ldd	,y++
+	std	,x++
+	ldd	,y++
+	std	,x++
+	ldd	,y++
+	std	,x++
+	;; reset the send state
+c@	ldd	#dataptr	; reset opos
+	std	opos
+	inc	seqno		; increment sequence no
+	;; load up regs with result
+	clra			; clear C
+	ldx	#buff+18	
+	ldd	buff+16
+	puls	y,pc		; return
+	;; return with timeout error
+toerr@	coma			; set C
+	puls	y,pc
+
+;;; Append a byte to output buffer
+;;;   takes: B = byte
+;;;   returns: nothing
+appendb
+	pshs	x
+	ldx	opos
+	stb	,x+
+	stx	opos
+	puls	x,pc
+
+;;; Append a word (16 bits) to output buffer
+;;;   takes: D = word
+;;;   returns: nothing
+appendw
+	pshs	x
+	ldx	opos
+	std	,x++
+	stx	opos
+	puls	x,pc
+
+;;; Append a string to output buffer
+;;;   takes: X = ptr, D = len
+;;;   returns: nothing
+appends
+	pshs	d,x,y,u
+	tfr	d,y
+	ldu	opos
+a@	ldb	,x+
+	stb	,u+
+	leay	-1,y
+	bne	a@
+	stu	opos
+	puls	d,x,y,u,pc
+
+
+start
+	ldx	#mac		; initialize NIC card
+	jsr	dev_init
+	bcs	err@
+	ldx	#hello@-1	; Print a string
+	jsr	$b99c
+	;; loop starts here
+d@	ldb	#$23		; send a time command
+	jsr	appendb
+	jsr	send
+	bcs	to@
+	;; print the received packet
+	lbsr	print
+e@	lda	#13		; print a CR
 	lbsr	putc
 	jsr	$a1b1		; get a key
-	bra	d@
+	bra	d@		; and repeat!
+	;; print timeout error
+to@	ldx	#tostr@-1
+	jsr	$b99c
+	bra	e@
 	;; return error
-err	ldx	#bad@-1		; print bad init
+err@	ldx	#bad@-1		; print bad init
 	jsr	$b99c
 	rts			; return to BASIC
 hello@	fcn	"DWOE"
 bad@	fcn	"DEVICE NOT FOUND"
-
-frame	.db	$ff,$ff,$ff,$ff,$ff,$ff ; Broadcast
-	.db	$00,$01,$02,$03,$04,$05 ; our MAC (needed?)
-	.dw	TYPE                    ; dw ethertype
-	.db	$00			; flags (command)
-	.db	$00			; sequence
-	.dw	1			; size of data
-	.db	$23		
-fe
+tostr@	fcn	"TIMEOUT"
